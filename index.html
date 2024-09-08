@@ -1,0 +1,709 @@
+
+<html>
+<head>
+<base href="https://websimcreationengine.com/multiplayer-pacman-improved-v4/">
+<title>Multiplayer Pac-Man: Cooperative Edition (Improved v4)</title>
+<style>
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #FFD1DC;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  font-family: 'Comic Sans MS', cursive;
+}
+
+#gameCanvas {
+  border: 8px solid #FF69B4;
+  border-radius: 20px;
+  box-shadow: 0 0 20px #FF69B4;
+}
+
+#gameInfo {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  color: #FF1493;
+  font-size: 18px;
+  text-shadow: 2px 2px 4px #FFC0CB;
+}
+
+#instructions {
+  position: absolute;
+  bottom: 20px;
+  color: #FF1493;
+  font-size: 16px;
+  text-align: center;
+  width: 100%;
+  background-color: rgba(255, 255, 255, 0.7);
+  padding: 10px;
+  border-radius: 10px;
+}
+
+#powerUpIndicator {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  color: #FF1493;
+  font-size: 18px;
+  text-shadow: 2px 2px 4px #FFC0CB;
+}
+
+#ghostJailTimer {
+  position: absolute;
+  top: 60px;
+  right: 20px;
+  color: #FF1493;
+  font-size: 18px;
+  text-shadow: 2px 2px 4px #FFC0CB;
+}
+
+#leaderboard {
+  position: absolute;
+  top: 100px;
+  right: 20px;
+  color: #FF1493;
+  font-size: 18px;
+  text-shadow: 2px 2px 4px #FFC0CB;
+  background-color: rgba(255, 255, 255, 0.7);
+  padding: 10px;
+  border-radius: 10px;
+}
+
+h3 {
+  margin-top: 0;
+  color: #FF69B4;
+}
+
+ol {
+  padding-left: 20px;
+}
+
+li {
+  margin-bottom: 5px;
+}
+
+#connectionStatus {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #FF1493;
+  font-size: 18px;
+  text-shadow: 2px 2px 4px #FFC0CB;
+}
+</style>
+<link href="https://fonts.googleapis.com/css2?family=Comic+Sans+MS&display=swap" rel="stylesheet">
+</head>
+<body>
+<div id="connectionStatus">Connecting...</div>
+<div id="gameInfo">
+  <div>Stage: <span id="stageNumber">1</span></div>
+  <div>Player 1 Score: <span id="player1Score">0</span></div>
+  <div>Player 2 Score: <span id="player2Score">0</span></div>
+</div>
+<canvas id="gameCanvas" width="800" height="600"></canvas>
+<div id="instructions">
+  Player 1: WASD to move | Player 2: Arrow Keys to move<br>
+  Work together to clear all pellets and advance to the next stage!<br>
+  Eat power pellets to become invincible and eat ghosts!<br>
+  Use pipes to teleport to the other side of the map!
+</div>
+<div id="powerUpIndicator">Power-Up: <span id="powerUpStatus">Inactive</span></div>
+<div id="ghostJailTimer">Ghost Jail Timer: <span id="jailTime">0</span></div>
+<div id="leaderboard">
+  <h3>Top Scores</h3>
+  <ol id="topScores"></ol>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.3/howler.min.js"></script>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const CELL_SIZE = 20;
+const COLS = 40;
+const ROWS = 30;
+const GAME_SPEED = 200; // ms between updates (lower = faster)
+
+let stage = 1;
+let player1, player2, ghosts, pellets, powerPellets, walls;
+let lastUpdateTime = 0;
+let ghostJail;
+let topScores = [];
+
+const sounds = {
+  chomp: new Howl({ src: ['https://websimcreationengine.com/sounds/chomp.mp3'] }),
+  death: new Howl({ src: ['https://websimcreationengine.com/sounds/death.mp3'] }),
+  win: new Howl({ src: ['https://websimcreationengine.com/sounds/win.mp3'] }),
+  powerUp: new Howl({ src: ['https://websimcreationengine.com/sounds/powerup.mp3'] }),
+  eatGhost: new Howl({ src: ['https://websimcreationengine.com/sounds/eatghost.mp3'] }),
+  teleport: new Howl({ src: ['https://websimcreationengine.com/sounds/teleport.mp3'] })
+};
+
+// WebSocket connection
+const socket = new WebSocket('wss://your-websocket-server-url');
+let playerId;
+
+socket.onopen = () => {
+  document.getElementById('connectionStatus').textContent = 'Connected';
+};
+
+socket.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === 'init') {
+    playerId = data.playerId;
+    initGame();
+  } else if (data.type === 'gameState') {
+    updateGameState(data.gameState);
+  }
+};
+
+socket.onclose = () => {
+  document.getElementById('connectionStatus').textContent = 'Disconnected';
+};
+
+class Player {
+  constructor(x, y, color, controls) {
+    this.x = x;
+    this.y = y;
+    this.color = color;
+    this.controls = controls;
+    this.direction = { x: 0, y: 0 };
+    this.score = 0;
+    this.mouthOpen = true;
+    this.mouthAngle = 0.2;
+    this.powerMode = false;
+    this.powerModeTimer = 0;
+  }
+
+  move() {
+    let newX = this.x + this.direction.x;
+    let newY = this.y + this.direction.y;
+
+    // Handle pipe teleportation
+    if (newX < 0) newX = COLS - 1;
+    if (newX >= COLS) newX = 0;
+    if (newY < 0) newY = ROWS - 1;
+    if (newY >= ROWS) newY = 0;
+
+    if (!walls.some(wall => wall.x === newX && wall.y === newY)) {
+      this.x = newX;
+      this.y = newY;
+      if (this.x === 0 || this.x === COLS - 1 || this.y === 0 || this.y === ROWS - 1) {
+        sounds.teleport.play();
+      }
+    }
+
+    // Animate mouth
+    this.mouthOpen = !this.mouthOpen;
+
+    // Update power mode
+    if (this.powerMode) {
+      this.powerModeTimer--;
+      if (this.powerModeTimer <= 0) {
+        this.powerMode = false;
+      }
+    }
+  }
+
+  draw() {
+    ctx.fillStyle = this.powerMode ? '#FF69B4' : this.color;
+    ctx.beginPath();
+    
+    const centerX = (this.x + 0.5) * CELL_SIZE;
+    const centerY = (this.y + 0.5) * CELL_SIZE;
+    const radius = CELL_SIZE / 2;
+    
+    let startAngle, endAngle;
+    if (this.direction.x === 1) {
+      startAngle = -this.mouthAngle;
+      endAngle = this.mouthAngle;
+    } else if (this.direction.x === -1) {
+      startAngle = Math.PI - this.mouthAngle;
+      endAngle = Math.PI + this.mouthAngle;
+    } else if (this.direction.y === 1) {
+      startAngle = Math.PI / 2 - this.mouthAngle;
+      endAngle = Math.PI / 2 + this.mouthAngle;
+    } else if (this.direction.y === -1) {
+      startAngle = 3 * Math.PI / 2 - this.mouthAngle;
+      endAngle = 3 * Math.PI / 2 + this.mouthAngle;
+    } else {
+      startAngle = 0;
+      endAngle = 2 * Math.PI;
+    }
+    
+    if (this.mouthOpen) {
+      ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+    } else {
+      ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+    }
+    
+    ctx.lineTo(centerX, centerY);
+    ctx.fill();
+
+    // Draw eye
+    ctx.fillStyle = '#000';
+    const eyeX = centerX + Math.cos(startAngle) * radius / 2;
+    const eyeY = centerY + Math.sin(startAngle) * radius / 2;
+    ctx.beginPath();
+    ctx.arc(eyeX, eyeY, radius / 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+class Ghost {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.originalColor = `hsl(${Math.random() * 360}, 100%, 75%)`;
+    this.color = this.originalColor;
+    this.direction = { x: 0, y: 0 };
+    this.moveCounter = 0;
+    this.isScared = false;
+    this.inJail = true;
+    this.jailTimer = Math.floor(Math.random() * 50) + 25; // Random jail time between 25-75 ticks
+  }
+
+  move() {
+    this.moveCounter++;
+    const moveThreshold = this.isScared ? 4 : 2; // Ghosts move slower when scared
+    if (this.moveCounter >= moveThreshold) {
+      this.moveCounter = 0;
+
+      if (this.inJail) {
+        this.jailTimer--;
+        if (this.jailTimer <= 0) {
+          this.inJail = false;
+          this.x = ghostJail.x;
+          this.y = ghostJail.y - 1;
+        }
+        return;
+      }
+      
+      const players = [player1, player2];
+      const target = this.isScared ? 
+        this.findFarthestCorner(players) : 
+        this.findClosestPlayer(players);
+
+      const path = this.findPath(target);
+      if (path.length > 1) {
+        const nextStep = path[1];
+        this.x = nextStep.x;
+        this.y = nextStep.y;
+      }
+    }
+  }
+
+  findClosestPlayer(players) {
+    return players.reduce((closest, player) => {
+      const distToThis = Math.abs(this.x - player.x) + Math.abs(this.y - player.y);
+      const distToClosest = Math.abs(this.x - closest.x) + Math.abs(this.y - closest.y);
+      return distToThis < distToClosest ? player : closest;
+    });
+  }
+
+  findFarthestCorner(players) {
+    const corners = [
+      {x: 0, y: 0},
+      {x: 0, y: ROWS - 1},
+      {x: COLS - 1, y: 0},
+      {x: COLS - 1, y: ROWS - 1}
+    ];
+
+    return corners.reduce((farthest, corner) => {
+      const distToPlayers = players.reduce((sum, player) => 
+        sum + Math.abs(corner.x - player.x) + Math.abs(corner.y - player.y), 0);
+      const distToFarthest = players.reduce((sum, player) => 
+        sum + Math.abs(farthest.x - player.x) + Math.abs(farthest.y - player.y), 0);
+      return distToPlayers > distToFarthest ? corner : farthest;
+    });
+  }
+
+  findPath(target) {
+    const openSet = [{x: this.x, y: this.y, g: 0, h: 0, f: 0}];
+    const closedSet = [];
+    const cameFrom = {};
+
+    while (openSet.length > 0) {
+      let current = openSet.reduce((min, node) => node.f < min.f ? node : min);
+
+      if (current.x === target.x && current.y === target.y) {
+        return this.reconstructPath(cameFrom, current);
+      }
+
+      openSet.splice(openSet.indexOf(current), 1);
+      closedSet.push(current);
+
+      const neighbors = this.getNeighbors(current);
+      for (let neighbor of neighbors) {
+        if (closedSet.some(node => node.x === neighbor.x && node.y === neighbor.y)) continue;
+
+        const tentativeG = current.g + 1;
+
+        if (!openSet.some(node => node.x === neighbor.x && node.y === neighbor.y)) {
+          openSet.push(neighbor);
+        } else if (tentativeG >= neighbor.g) {
+          continue;
+        }
+
+        cameFrom[`${neighbor.x},${neighbor.y}`] = current;
+        neighbor.g = tentativeG;
+        neighbor.h = Math.abs(neighbor.x - target.x) + Math.abs(neighbor.y - target.y);
+        neighbor.f = neighbor.g + neighbor.h;
+      }
+    }
+
+    return []; // No path found
+  }
+
+  getNeighbors(node) {
+    const directions = [{x: 0, y: -1}, {x: 1, y: 0}, {x: 0, y: 1}, {x: -1, y: 0}];
+    return directions.map(dir => {
+      let newX = (node.x + dir.x + COLS) % COLS;
+      let newY = (node.y + dir.y + ROWS) % ROWS;
+      return {x: newX, y: newY};
+    }).filter(pos => !walls.some(wall => wall.x === pos.x && wall.y === pos.y));
+  }
+
+  reconstructPath(cameFrom, current) {
+    const path = [current];
+    while (`${current.x},${current.y}` in cameFrom) {
+      current = cameFrom[`${current.x},${current.y}`];
+      path.unshift(current);
+    }
+    return path;
+  }
+
+  draw() {
+    if (this.inJail) return;
+
+    ctx.fillStyle = this.isScared ? '#87CEFA' : this.color;
+    const x = this.x * CELL_SIZE;
+    const y = this.y * CELL_SIZE;
+    const width = CELL_SIZE;
+    const height = CELL_SIZE;
+
+    // Body
+    ctx.beginPath();
+    ctx.moveTo(x, y + height);
+    ctx.quadraticCurveTo(x + width / 2, y - height / 4, x + width, y + height);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x + width / 3, y + height / 3, width / 6, 0, Math.PI * 2);
+    ctx.arc(x + 2 * width / 3, y + height / 3, width / 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(x + width / 3, y + height / 3, width / 10, 0, Math.PI * 2);
+    ctx.arc(x + 2 * width / 3, y + height / 3, width / 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function generateMaze() {
+  const maze = Array(ROWS).fill().map(() => Array(COLS).fill(1));
+
+  function carve(x, y) {
+    maze[y][x] = 0;
+    const directions = [
+      { dx: 0, dy: -1 },
+      { dx: 1, dy: 0 },
+      { dx: 0, dy: 1 },
+      { dx: -1, dy: 0 }
+    ].sort(() => Math.random() - 0.5);
+
+    for (const dir of directions) {
+      const nx = x + dir.dx * 2;
+      const ny = y + dir.dy * 2;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && maze[ny][nx] === 1) {
+        maze[y + dir.dy][x + dir.dx] = 0;
+        carve(nx, ny);
+      }
+    }
+  }
+
+  carve(1, 1);
+
+  // Create more openings to ensure connectivity
+  for (let i = 0; i < COLS * ROWS / 10; i++) {
+    const x = Math.floor(Math.random() * (COLS - 2)) + 1;
+    const y = Math.floor(Math.random() * (ROWS - 2)) + 1;
+    maze[y][x] = 0;
+    // Also open adjacent cells to create wider paths
+    if (x > 0) maze[y][x-1] = 0;
+    if (x < COLS - 1) maze[y][x+1] = 0;
+    if (y > 0) maze[y-1][x] = 0;
+    if (y < ROWS - 1) maze[y+1][x] = 0;
+  }
+
+  // Create ghost jail
+  const jailSize = 3;
+  const jailX = Math.floor(COLS / 2) - Math.floor(jailSize / 2);
+  const jailY = Math.floor(ROWS / 2) - Math.floor(jailSize / 2);
+  for (let y = jailY; y < jailY + jailSize; y++) {
+    for (let x = jailX; x < jailX + jailSize; x++) {
+      maze[y][x] = 0;
+    }
+  }
+  // Add jail walls
+  for (let x = jailX - 1; x <= jailX + jailSize; x++) {
+    maze[jailY - 1][x] = 1;
+    maze[jailY + jailSize][x] = 1;
+  }
+  for (let y = jailY; y < jailY + jailSize; y++) {
+    maze[y][jailX - 1] = 1;
+    maze[y][jailX + jailSize] = 1;
+  }
+  // Add jail door
+  maze[jailY - 1][jailX + Math.floor(jailSize / 2)] = 0;
+
+  ghostJail = { x: jailX + Math.floor(jailSize / 2), y: jailY + Math.floor(jailSize / 2) };
+
+  return maze;
+}
+
+function initGame() {
+  const maze = generateMaze();
+
+  player1 = new Player(1, 1, '#FFA500', { up: 'w', down: 's', left: 'a', right: 'd' });
+  player2 = new Player(COLS - 2, ROWS - 2, '#00CED1', { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight' });
+
+  ghosts = Array(stage + 2).fill().map(() => new Ghost(ghostJail.x, ghostJail.y));
+
+  walls = [];
+  pellets = [];
+  powerPellets = [];
+
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (maze[y][x] === 1) {
+        walls.push({ x, y });
+      } else if (Math.random() < 0.5) { // Increase pellet density
+        pellets.push({ x, y });
+      }
+    }
+  }
+
+  // Add power pellets
+  for (let i = 0; i < 4; i++) {
+    let x, y;
+    do {
+      x = Math.floor(Math.random() * COLS);
+      y = Math.floor(Math.random() * ROWS);
+    } while (maze[y][x] === 1 || pellets.some(p => p.x === x && p.y === y));
+    powerPellets.push({ x, y });
+  }
+}
+
+function update(currentTime) {
+  if (currentTime - lastUpdateTime > GAME_SPEED) {
+    if (playerId === 1) {
+      player1.move();
+    } else if (playerId === 2) {
+      player2.move();
+    }
+
+    ghosts.forEach(ghost => ghost.move());
+
+    [player1, player2].forEach(player => {
+      // Check for pellet collection
+      pellets = pellets.filter(pellet => {
+        if (pellet.x === player.x && pellet.y === player.y) {
+          sounds.chomp.play();
+          player.score += 10;
+          return false;
+        }
+        return true;
+      });
+
+      // Check for power pellet collection
+      powerPellets = powerPellets.filter(pellet => {
+        if (pellet.x === player.x && pellet.y === player.y) {
+          sounds.powerUp.play();
+          player.powerMode = true;
+          player.powerModeTimer = 50; // Last for 50 game ticks
+          player.score += 50;
+          ghosts.forEach(ghost => ghost.isScared = true);
+          return false;
+        }
+        return true;
+      });
+
+      // Check for ghost collisions
+      ghosts.forEach((ghost, index) => {
+        if (ghost.x === player.x && ghost.y === player.y && !ghost.inJail) {
+          if (player.powerMode) {
+            sounds.eatGhost.play();
+            player.score += 200;
+            ghost.isScared = false;
+            ghost.inJail = true;
+            ghost.jailTimer = 50; // Reset jail timer
+            ghost.x = ghostJail.x;
+            ghost.y = ghostJail.y;
+          } else {
+            sounds.death.play();
+            initGame();
+          }
+        }
+      });
+    });
+
+    // Reset ghost state if power mode ends
+    if (!player1.powerMode && !player2.powerMode) {
+      ghosts.forEach(ghost => {
+        ghost.isScared = false;
+        ghost.color = ghost.originalColor;
+      });
+    }
+
+    if (pellets.length === 0 && powerPellets.length === 0) {
+      sounds.win.play();
+      stage++;
+      initGame();
+    }
+
+    lastUpdateTime = currentTime;
+
+    // Send game state to server
+    sendGameState();
+  }
+}
+
+function sendGameState() {
+  const gameState = {
+    player1: { x: player1.x, y: player1.y, score: player1.score, powerMode: player1.powerMode },
+    player2: { x: player2.x, y: player2.y, score: player2.score, powerMode: player2.powerMode },
+    ghosts: ghosts.map(ghost => ({ x: ghost.x, y: ghost.y, isScared: ghost.isScared, inJail: ghost.inJail })),
+    pellets: pellets,
+    powerPellets: powerPellets,
+    stage: stage
+  };
+
+  socket.send(JSON.stringify({ type: 'gameState', gameState: gameState }));
+}
+
+function updateGameState(gameState) {
+  player1.x = gameState.player1.x;
+  player1.y = gameState.player1.y;
+  player1.score = gameState.player1.score;
+  player1.powerMode = gameState.player1.powerMode;
+
+  player2.x = gameState.player2.x;
+  player2.y = gameState.player2.y;
+  player2.score = gameState.player2.score;
+  player2.powerMode = gameState.player2.powerMode;
+
+  ghosts = gameState.ghosts.map((ghostState, index) => {
+    const ghost = ghosts[index] || new Ghost(ghostState.x, ghostState.y);
+    ghost.x = ghostState.x;
+    ghost.y = ghostState.y;
+    ghost.isScared = ghostState.isScared;
+    ghost.inJail = ghostState.inJail;
+    return ghost;
+  });
+
+  pellets = gameState.pellets;
+  powerPellets = gameState.powerPellets;
+  stage = gameState.stage;
+}
+
+function draw() {
+  ctx.fillStyle = '#FFD1DC';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Draw walls
+  ctx.fillStyle = '#FF69B4';
+  walls.forEach(wall => {
+    ctx.fillRect(wall.x * CELL_SIZE, wall.y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+  });
+
+  // Draw pellets
+  ctx.fillStyle = '#FF1493';
+  pellets.forEach(pellet => {
+    ctx.beginPath();
+    ctx.arc((pellet.x + 0.5) * CELL_SIZE, (pellet.y + 0.5) * CELL_SIZE, CELL_SIZE / 6, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Draw power pellets
+  ctx.fillStyle = '#FF00FF';
+  powerPellets.forEach(pellet => {
+    ctx.beginPath();
+    ctx.arc((pellet.x + 0.5) * CELL_SIZE, (pellet.y + 0.5) * CELL_SIZE, CELL_SIZE / 3, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  player1.draw();
+  player2.draw();
+  ghosts.forEach(ghost => ghost.draw());
+
+  document.getElementById('stageNumber').textContent = stage;
+  document.getElementById('player1Score').textContent = player1.score;
+  document.getElementById('player2Score').textContent = player2.score;
+  
+  // Update power-up indicator
+  const powerUpStatus = player1.powerMode || player2.powerMode ? 'Active' : 'Inactive';
+  document.getElementById('powerUpStatus').textContent = powerUpStatus;
+  
+  // Update ghost jail timer
+  const jailedGhost = ghosts.find(ghost => ghost.inJail);
+  document.getElementById('jailTime').textContent = jailedGhost ? jailedGhost.jailTimer : 0;
+}
+
+function gameLoop(currentTime) {
+  update(currentTime);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+document.addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  let direction;
+
+  if (playerId === 1) {
+    if (key === player1.controls.up) direction = { x: 0, y: -1 };
+    if (key === player1.controls.down) direction = { x: 0, y: 1 };
+    if (key === player1.controls.left) direction = { x: -1, y: 0 };
+    if (key === player1.controls.right) direction = { x: 1, y: 0 };
+    if (direction) {
+      player1.direction = direction;
+      socket.send(JSON.stringify({ type: 'playerMove', playerId: 1, direction: direction }));
+    }
+  } else if (playerId === 2) {
+    if (key === player2.controls.up.toLowerCase()) direction = { x: 0, y: -1 };
+    if (key === player2.controls.down.toLowerCase()) direction = { x: 0, y: 1 };
+    if (key === player2.controls.left.toLowerCase()) direction = { x: -1, y: 0 };
+    if (key === player2.controls.right.toLowerCase()) direction = { x: 1, y: 0 };
+    if (direction) {
+      player2.direction = direction;
+      socket.send(JSON.stringify({ type: 'playerMove', playerId: 2, direction: direction }));
+    }
+  }
+});
+
+function updateLeaderboard() {
+  const combinedScore = player1.score + player2.score;
+  topScores.push(combinedScore);
+  topScores.sort((a, b) => b - a);
+  topScores = topScores.slice(0, 5);
+  
+  const leaderboardElement = document.getElementById('topScores');
+  leaderboardElement.innerHTML = '';
+  topScores.forEach(score => {
+    const li = document.createElement('li');
+    li.textContent = score;
+    leaderboardElement.appendChild(li);
+  });
+}
+
+gameLoop();
+</script>
+</body>
+</html>
